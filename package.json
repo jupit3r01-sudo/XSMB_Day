@@ -1,0 +1,12 @@
+{
+  "name": "minhngoc-auto-capture",
+  "version": "1.0.0",
+  "description": "Tu dong chup anh ket qua xo so tren minhngoc.net hang ngay bang Puppeteer",
+  "main": "capture.js",
+  "scripts": {
+    "start": "node capture.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}

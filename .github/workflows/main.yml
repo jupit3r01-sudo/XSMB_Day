@@ -1,0 +1,35 @@
+name: Chup ket qua xo so hang ngay
+
+on:
+  schedule:
+    # 00:00 UTC = 07:00 gio Viet Nam (UTC+7)
+    - cron: '0 0 * * *'
+  workflow_dispatch: {}   # cho phep bam "Run workflow" de test thu cong
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cai thu vien he thong can cho Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2t64 || sudo apt-get install -y libasound2
+
+      - name: Cai dependencies npm
+        run: npm install
+
+      - name: Chay script chup anh + gui Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TARGET_URL: 'https://www.minhngoc.net/ket-qua-xo-so/mien-bac.html'
+        run: node capture.js

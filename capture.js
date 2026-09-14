@@ -55,12 +55,16 @@ async function run() {
 
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 1600 });
+    // deviceScaleFactor cao hon -> anh net hon (tuong duong "scale" trong html2canvas ban goc)
+    await page.setViewport({ width: 1280, height: 1600, deviceScaleFactor: 3 });
     await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    // Cho chac chan bang ket qua da render xong
+    // Cho chac chan bang ket qua, font, anh da tai/render xong
     await page.waitForSelector('body');
-    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      await page.evaluate(() => document.fonts && document.fonts.ready);
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 3000));
 
     // Chay logic tim khoi ket qua ngay trong trang, giong userscript goc,
     // roi gan attribute de lay elementHandle ra ngoai.

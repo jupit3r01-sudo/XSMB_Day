@@ -1,13 +1,18 @@
 // capture.js
 // Mo trang minhngoc.net (trang nay mac dinh hien 7 ngay gan nhat: hom nay -> lui 6 ngay).
 // Tach rieng tung block theo tung ngay, BO QUA ngay hom nay (chua co ket qua luc 7h sang),
-// chi chup + gui 6 ngay con lai (n-6 -> n-1). Ngay nao da gui roi (luu trong sent-log.json)
-// thi bo qua, giup nhanh hon va anh net hon (khong phai ghep nhieu ngay thanh 1 anh dai).
+// GHEP toan bo cac ngay con lai (n-6 -> n-1) thanh 1 anh DUY NHAT roi gui 1 lan qua Telegram.
+// Ngay nao da gui roi (luu trong sent-log.json) thi bo qua khoi anh ghep, tranh gui lai.
 //
 // Bien moi truong can co (dat trong GitHub Secrets):
 //   TELEGRAM_BOT_TOKEN  - token cua bot Telegram (lay tu @BotFather)
 //   TELEGRAM_CHAT_ID    - id cua chat/nguoi nhan
 //   TARGET_URL          - (tuy chon) URL trang ket qua, mac dinh la mien Bac
+//
+// Bien moi truong CHI DUNG DE TEST (khong can khi chay thuc te qua GitHub Actions):
+//   LOCAL_TEST=1        - luu anh ghep ra file local (./debug-output.png) de xem thu,
+//                         KHONG gui Telegram va KHONG ghi sent-log.json
+//   IGNORE_SENT_LOG=1   - bo qua sent-log.json, coi nhu chua ngay nao duoc gui (de test lai tu dau)
 
 const fs = require('fs');
 const path = require('path');
@@ -16,6 +21,8 @@ const puppeteer = require('puppeteer');
 const TARGET_URL = process.env.TARGET_URL || 'https://www.minhngoc.net/kqxs/mien-bac.html';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const LOCAL_TEST = process.env.LOCAL_TEST === '1';
+const IGNORE_SENT_LOG = process.env.IGNORE_SENT_LOG === '1';
 
 // So ngay toi da bo qua tinh tu "hom nay" (khong tinh hom nay): n-6 -> n-1 = 6 ngay
 const DAYS_BACK = 6;
@@ -23,13 +30,16 @@ const DAYS_BACK = 6;
 const SENT_LOG_PATH = path.join(process.cwd(), 'sent-log.json');
 // Chi giu lai log trong X ngay gan nhat de file khong phinh to theo thoi gian
 const KEEP_LOG_DAYS = 40;
+// File anh ghep se luu khi chay o che do LOCAL_TEST
+const DEBUG_OUTPUT_PATH = path.join(process.cwd(), 'debug-output.png');
 
-if (!BOT_TOKEN || !CHAT_ID) {
+if (!LOCAL_TEST && (!BOT_TOKEN || !CHAT_ID)) {
   console.error('Thieu TELEGRAM_BOT_TOKEN hoac TELEGRAM_CHAT_ID trong bien moi truong.');
   process.exit(1);
 }
 
 function loadSentLog() {
+  if (IGNORE_SENT_LOG) return [];
   try {
     const raw = fs.readFileSync(SENT_LOG_PATH, 'utf8');
     const data = JSON.parse(raw);
@@ -75,6 +85,10 @@ async function sendDocumentToTelegram(buffer, filename, caption) {
 }
 
 async function sendTextToTelegram(text) {
+  if (LOCAL_TEST) {
+    console.log('[LOCAL_TEST] Bo qua gui text Telegram:', text);
+    return;
+  }
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -192,48 +206,112 @@ async function run() {
     const sentDates = loadSentLog();
     const sentSet = new Set(sentDates);
 
-    // Chi xu ly nhung ngay CHUA co trong sent-log, gui theo thu tu tu cu -> moi cho de theo doi
-    const toProcess = targetDayKeys.filter((k) => !sentSet.has(k)).reverse();
+    // Chi ghep nhung ngay CHUA co trong sent-log
+    const toProcess = targetDayKeys.filter((k) => !sentSet.has(k));
 
     if (toProcess.length === 0) {
       console.log('Tat ca cac ngay trong pham vi da duoc gui truoc do. Khong can chup lai.');
       return;
     }
 
-    console.log('Cac ngay se chup + gui:', toProcess.join(', '));
+    console.log('Cac ngay se ghep vao 1 anh:', toProcess.join(', '));
 
-    let anySuccess = false;
-    for (const dayKey of toProcess) {
-      try {
-        const el = await page.$(`[data-mn-day="${dayKey}"]`);
-        if (!el) {
-          console.warn(`Khong lay duoc elementHandle cho ngay ${dayKey}, bo qua.`);
-          continue;
-        }
+    // Ghep toan bo cac ngay trong toProcess thanh 1 khoi duy nhat trong trang (da loc quang cao),
+    // roi chup 1 anh duy nhat cho khoi do.
+    const shotInfo = await page.evaluate((keys) => {
+      const AD_SELECTORS = [
+        'script', 'style', 'iframe', 'ins', 'noscript', 'embed',
+        '[id*="ads" i]', '[class*="ads" i]',
+        '[id*="ad-" i]', '[class*="ad-" i]',
+        '[id*="adv" i]', '[class*="adv" i]',
+        '[id*="banner" i]', '[class*="banner" i]',
+        '[id*="quangcao" i]', '[class*="quangcao" i]',
+        '[id*="sponsor" i]', '[class*="sponsor" i]',
+        '[id^="div-gpt-ad"]',
+      ];
 
-        const buffer = await el.screenshot({ type: 'png' });
-        const [d, m, y] = dayKey.split('-');
-        const displayDate = `${d}/${m}/${y}`;
-
-        await sendDocumentToTelegram(buffer, `ket-qua_${dayKey}.png`, `Ket qua xo so - ${displayDate}`);
-        console.log(`Da gui anh ngay ${displayDate} qua Telegram thanh cong.`);
-
-        sentSet.add(dayKey);
-        anySuccess = true;
-
-        // Cho 1 chut giua cac lan gui de tranh bi Telegram rate-limit
-        await new Promise((r) => setTimeout(r, 1000));
-      } catch (err) {
-        console.error(`Loi khi xu ly ngay ${dayKey}:`, err);
-        try {
-          await sendTextToTelegram(`❌ Loi khi chup/gui anh ket qua ngay ${dayKey}: ${err.message}`);
-        } catch (_) {}
+      function stripAds(root) {
+        AD_SELECTORS.forEach((sel) => {
+          try {
+            root.querySelectorAll(sel).forEach((el) => el.remove());
+          } catch (_) {
+            /* selector khong ho tro tren trinh duyet nay, bo qua */
+          }
+        });
       }
+
+      const elements = keys
+        .map((k) => document.querySelector(`[data-mn-day="${k}"]`))
+        .filter(Boolean);
+
+      if (elements.length === 0) return null;
+
+      // Sap xep lai theo vi tri hien tai tren trang (moi nhat o tren, cu nhat o duoi)
+      elements.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+
+      const refWidth = elements[0].getBoundingClientRect().width || 520;
+
+      const wrapper = document.createElement('div');
+      wrapper.id = 'mn-combined-capture-wrapper';
+      wrapper.style.background = '#ffffff';
+      wrapper.style.width = `${Math.ceil(refWidth)}px`;
+      wrapper.style.padding = '0';
+      wrapper.style.margin = '24px 0 0 0';
+
+      elements.forEach((el, idx) => {
+        const clone = el.cloneNode(true);
+        stripAds(clone);
+        clone.style.marginBottom = idx < elements.length - 1 ? '18px' : '0';
+        wrapper.appendChild(clone);
+      });
+
+      document.body.appendChild(wrapper);
+      return { id: wrapper.id, count: elements.length };
+    }, toProcess);
+
+    if (!shotInfo) {
+      console.warn('Khong ghep duoc anh: khong tim thay block nao khop voi cac ngay can xu ly.');
+      return;
     }
 
-    if (anySuccess) {
-      saveSentLog([...sentSet]);
+    const wrapperHandle = await page.$(`#${shotInfo.id}`);
+    const buffer = await wrapperHandle.screenshot({ type: 'png' });
+
+    // Don dep khoi ghep tam sau khi da chup xong
+    await page.evaluate((id) => {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    }, shotInfo.id);
+
+    // Sap xep lai toProcess theo thu tu thoi gian (cu -> moi) chi de lam caption cho de doc
+    const chronological = [...toProcess].sort((a, b) => parseDdMmYyyy(a) - parseDdMmYyyy(b));
+    const toDisplay = (key) => {
+      const [d, m, y] = key.split('-');
+      return `${d}/${m}/${y}`;
+    };
+    const caption =
+      chronological.length === 1
+        ? `Ket qua xo so - ${toDisplay(chronological[0])}`
+        : `Ket qua xo so tu ${toDisplay(chronological[0])} den ${toDisplay(chronological[chronological.length - 1])}`;
+    const filename = `ket-qua_ghep_${chronological[0]}_${chronological[chronological.length - 1]}.png`;
+
+    if (LOCAL_TEST) {
+      fs.writeFileSync(DEBUG_OUTPUT_PATH, buffer);
+      console.log(`[LOCAL_TEST] Da luu anh ghep vao ${DEBUG_OUTPUT_PATH} (${shotInfo.count} ngay). Khong gui Telegram, khong ghi sent-log.json.`);
+      return;
+    }
+
+    try {
+      await sendDocumentToTelegram(buffer, filename, caption);
+      console.log(`Da gui anh ghep (${shotInfo.count} ngay: ${toProcess.join(', ')}) qua Telegram thanh cong.`);
+      saveSentLog([...sentSet, ...toProcess]);
       console.log('Da cap nhat sent-log.json.');
+    } catch (err) {
+      console.error('Loi khi gui anh ghep qua Telegram:', err);
+      try {
+        await sendTextToTelegram(`❌ Loi khi chup/gui anh ket qua ghep (${toProcess.join(', ')}): ${err.message}`);
+      } catch (_) {}
+      process.exit(1);
     }
   } finally {
     await browser.close();

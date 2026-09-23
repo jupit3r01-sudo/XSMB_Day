@@ -1,12 +1,13 @@
 {
   "name": "minhngoc-auto-capture",
   "version": "1.0.0",
-  "description": "Tu dong chup anh ket qua xo so tren minhngoc.net hang ngay bang Puppeteer",
+  "description": "Tu dong chup anh ket qua xo so tren minhngoc.net hang ngay bang Puppeteer va Sharp",
   "main": "capture.js",
   "scripts": {
     "start": "node capture.js"
   },
   "dependencies": {
-    "puppeteer": "^23.0.0"
+    "puppeteer": "^23.0.0",
+    "sharp": "^0.33.5"
   }
 }

@@ -1,19 +1,10 @@
-// capture.js
-// Mo trang minhngoc.net (hien thi cac ngay gan nhat: tu ngay moi nhat tro ve truoc).
-// Lay day du header do + bang ket qua, ghep thanh 1 anh dai DUY NHAT roi gui qua Telegram.
-//
-// Bien moi truong can co (dat trong GitHub Secrets):
-//   TELEGRAM_BOT_TOKEN  - token cua bot Telegram (lay tu @BotFather)
-//   TELEGRAM_CHAT_ID    - id cua chat/nguoi nhan
-//   TARGET_URL          - (tuy chon) URL trang ket qua, mac dinh la mien Bac
-//
-// Bien moi truong CHI DUNG DE TEST:
-//   LOCAL_TEST=1        - luu anh ghep ra file local (./debug-output.png)
-//   IGNORE_SENT_LOG=1   - bo qua sent-log.json, coi nhu chua ngay nao duoc gui
+// XSMB.js
+// Chup tung ngay theo khung hinh chuan (clip bounding box), sau do dung sharp ghep thanh 1 anh dai.
 
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer');
+const sharp = require('sharp');
 
 const TARGET_URL = process.env.TARGET_URL || 'https://www.minhngoc.net/kqxs/mien-bac.html';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -21,7 +12,6 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const LOCAL_TEST = process.env.LOCAL_TEST === '1';
 const IGNORE_SENT_LOG = process.env.IGNORE_SENT_LOG === '1';
 
-// So luong ngay can chup ghep (7 ngay: tu 22 xuong 16/15 nhu anh mau)
 const TOTAL_DAYS = 7;
 const SENT_LOG_PATH = path.join(process.cwd(), 'sent-log.json');
 const KEEP_LOG_DAYS = 40;
@@ -98,8 +88,7 @@ async function run() {
 
   try {
     const page = await browser.newPage();
-    // Tang deviceScaleFactor len 2 de chat luong anh sac net nhu html2canvas scale 2
-    await page.setViewport({ width: 1280, height: 2000, deviceScaleFactor: 2 });
+    await page.setViewport({ width: 1280, height: 2600, deviceScaleFactor: 2 });
     await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
 
     await page.waitForSelector('body');
@@ -108,141 +97,125 @@ async function run() {
     } catch (_) {}
     await new Promise((r) => setTimeout(r, 2000));
 
-    // Tim dung khoi bao gom ca Header do va bang so
-    const dayKeysNewestFirst = await page.evaluate(() => {
-      function normText(s) {
-        return (s || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
-      }
-
-      let blocks = Array.from(document.querySelectorAll('.box_kqxs, .content-box, div[class*="box_kq"]'));
-
-      if (blocks.length === 0) {
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-        let node;
-        const headers = [];
-        while ((node = walker.nextNode())) {
-          const t = normText(node.textContent);
-          if (/KẾT QUẢ XỔ SỐ/i.test(t)) {
-            headers.push(node.parentElement);
+    // 1. An triet de toan bo bang Loto (Chuc - So - D.Vi) va cac tien ich thua tren DOM goc
+    await page.evaluate(() => {
+      // An tat ca cac phan tu lien quan toi loto / chuc / d.vi
+      const allEls = document.querySelectorAll('*');
+      allEls.forEach((el) => {
+        const txt = (el.innerText || '').replace(/\s+/g, ' ');
+        if (txt.includes('Chục') && txt.includes('Đ.Vị')) {
+          const container = el.closest('table, div, td');
+          if (container && !container.innerText.includes('Giải ĐB')) {
+            container.style.display = 'none';
           }
         }
-        blocks = headers.map((h) => h.closest('.box, table, div[class*="content"]') || h.parentElement);
-      }
-
-      const unique = [];
-      blocks.forEach((el) => {
-        if (el && !unique.includes(el) && el.innerText.includes('Giải ĐB')) {
-          unique.push(el);
-        }
       });
 
-      const validBlocks = unique
-        .filter((el) => !unique.some((other) => other !== el && el.contains(other)))
-        .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-
-      const dayKeys = [];
-      validBlocks.forEach((block) => {
-        const txt = block.innerText || '';
-        const m = txt.match(/Ngày:\s*(\d{2})\/(\d{2})\/(\d{4})/);
-        if (m) {
-          const key = `${m[1]}-${m[2]}-${m[3]}`;
-          block.setAttribute('data-mn-day', key);
-          dayKeys.push(key);
-        }
+      // An cac thanh tien ich nut bam
+      document.querySelectorAll('.sub-title, .tools, .buttons, a[href*="in-ve-do"], div[class*="tool"]').forEach((el) => {
+        el.style.display = 'none';
       });
-
-      return dayKeys;
     });
 
-    if (dayKeysNewestFirst.length === 0) {
-      await sendTextToTelegram(
-        '⚠️ Khong tim thay khoi ket qua xo so tren trang. Trang co the da doi cau truc, can kiem tra lai script.'
-      );
+    // 2. Do toa do chuan: Width lay theo dong Giai bay, Height tu dinh .bkm den day Giai bay
+    const blocksData = await page.evaluate(() => {
+      const bkmList = Array.from(document.querySelectorAll('.bkm'));
+      const results = [];
+
+      bkmList.forEach((bkm) => {
+        const txt = bkm.innerText || '';
+        const m = txt.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
+        if (!m) return;
+        const key = `${m[1]}-${m[2]}-${m[3]}`;
+
+        const parent = bkm.closest('.box_kqxs, .content-box, div[class*="box"]') || bkm.parentElement;
+        const mainTable = parent.querySelector('table.bkqmienbac') || parent.querySelector('table');
+        if (!mainTable) return;
+
+        const rows = Array.from(mainTable.querySelectorAll('tr'));
+        const rowGiaiBay = rows.find((r) => (r.innerText || '').includes('Giải bảy'));
+        if (!rowGiaiBay) return;
+
+        const bkmRect = bkm.getBoundingClientRect();
+        const bayRect = rowGiaiBay.getBoundingClientRect();
+
+        // Chieu rong lay theo dong Giai bay (chuan xac theo mep bang, khong vuot sang cot loto)
+        const x = window.scrollX + bayRect.left;
+        const y = window.scrollY + bkmRect.top;
+        const width = bayRect.width;
+        const height = bayRect.bottom - bkmRect.top;
+
+        results.push({
+          key,
+          clip: { x, y, width, height }
+        });
+      });
+
+      return results;
+    });
+
+    if (blocksData.length === 0) {
+      await sendTextToTelegram('⚠️ Khong xac dinh duoc toa do cac khung ket qua tren trang.');
       process.exit(1);
     }
 
-    // Lay tu ngay dau tien (index 0, ngay 22) xuong cac ngay tiep theo
-    const targetDayKeys = dayKeysNewestFirst.slice(0, TOTAL_DAYS);
-
+    const targetBlocks = blocksData.slice(0, TOTAL_DAYS);
     const sentDates = loadSentLog();
     const sentSet = new Set(sentDates);
 
-    // Neu khong dung che do LOCAL_TEST, loc bo nhung ngay da gui
-    const toProcess = LOCAL_TEST ? targetDayKeys : targetDayKeys.filter((k) => !sentSet.has(k));
+    const toProcess = LOCAL_TEST ? targetBlocks : targetBlocks.filter((b) => !sentSet.has(b.key));
 
     if (toProcess.length === 0) {
       console.log('Tat ca cac ngay can chup da duoc gui truoc do.');
       return;
     }
 
-    console.log('Cac ngay se ghep vao 1 anh:', toProcess.join(', '));
+    console.log('Chup rieng tung ngay:', toProcess.map((b) => b.key).join(', '));
 
-    // Tao wrapper tam de ghep cac khoi (da loc sach quang cao)
-    const shotInfo = await page.evaluate((keys) => {
-      const AD_SELECTORS = [
-        'script', 'style', 'iframe', 'ins', 'noscript', 'embed',
-        '[id*="ads" i]', '[class*="ads" i]',
-        '[id*="ad-" i]', '[class*="ad-" i]',
-        '[id*="adv" i]', '[class*="adv" i]',
-        '[id*="banner" i]', '[class*="banner" i]',
-        '[id*="quangcao" i]', '[class*="quangcao" i]',
-        '[id*="sponsor" i]', '[class*="sponsor" i]',
-        '[id^="div-gpt-ad"]',
-      ];
-
-      function stripAds(root) {
-        AD_SELECTORS.forEach((sel) => {
-          try {
-            root.querySelectorAll(sel).forEach((el) => el.remove());
-          } catch (_) {}
-        });
-      }
-
-      const elements = keys
-        .map((k) => document.querySelector(`[data-mn-day="${k}"]`))
-        .filter(Boolean);
-
-      if (elements.length === 0) return null;
-
-      elements.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-
-      const refWidth = elements[0].getBoundingClientRect().width || 560;
-
-      const wrapper = document.createElement('div');
-      wrapper.id = 'mn-combined-capture-wrapper';
-      wrapper.style.background = '#ffffff';
-      wrapper.style.width = `${Math.ceil(refWidth)}px`;
-      wrapper.style.padding = '0';
-      wrapper.style.margin = '20px auto';
-
-      elements.forEach((el, idx) => {
-        const clone = el.cloneNode(true);
-        stripAds(clone);
-        clone.style.margin = '0 auto';
-        clone.style.marginBottom = idx < elements.length - 1 ? '18px' : '0';
-        clone.style.width = '100%';
-        wrapper.appendChild(clone);
+    // Chup anh tung block
+    const dayBuffers = [];
+    for (const item of toProcess) {
+      const buf = await page.screenshot({
+        type: 'png',
+        clip: item.clip,
       });
-
-      document.body.appendChild(wrapper);
-      return { id: wrapper.id, count: elements.length };
-    }, toProcess);
-
-    if (!shotInfo) {
-      console.warn('Khong tim thay block tuong ung de ghep.');
-      return;
+      dayBuffers.push(buf);
     }
 
-    const wrapperHandle = await page.$(`#${shotInfo.id}`);
-    const buffer = await wrapperHandle.screenshot({ type: 'png' });
+    console.log(`Da chup xong ${dayBuffers.length} anh. Dang ghep bang sharp...`);
 
-    // Xoa wrapper tam
-    await page.evaluate((id) => {
-      const el = document.getElementById(id);
-      if (el) el.remove();
-    }, shotInfo.id);
+    // Ghep bang sharp
+    const imagesMeta = await Promise.all(dayBuffers.map((buf) => sharp(buf).metadata()));
 
-    const chronological = [...toProcess].sort((a, b) => parseDdMmYyyy(a) - parseDdMmYyyy(b));
+    const SPACING = 16;
+    const maxWidth = Math.max(...imagesMeta.map((m) => m.width));
+    const totalHeight = imagesMeta.reduce((sum, m) => sum + m.height, 0) + SPACING * (dayBuffers.length - 1);
+
+    let currentTop = 0;
+    const compositeList = [];
+
+    for (let i = 0; i < dayBuffers.length; i++) {
+      compositeList.push({
+        input: dayBuffers[i],
+        top: currentTop,
+        left: 0,
+      });
+      currentTop += imagesMeta[i].height + SPACING;
+    }
+
+    const combinedBuffer = await sharp({
+      create: {
+        width: maxWidth,
+        height: totalHeight,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 1 },
+      },
+    })
+      .composite(compositeList)
+      .png()
+      .toBuffer();
+
+    const chronological = toProcess.map((b) => b.key).sort((a, b) => parseDdMmYyyy(a) - parseDdMmYyyy(b));
     const toDisplay = (key) => {
       const [d, m, y] = key.split('-');
       return `${d}/${m}/${y}`;
@@ -254,15 +227,15 @@ async function run() {
     const filename = `KQXS_${chronological[0]}_${chronological[chronological.length - 1]}.png`;
 
     if (LOCAL_TEST) {
-      fs.writeFileSync(DEBUG_OUTPUT_PATH, buffer);
-      console.log(`[LOCAL_TEST] Da luu anh vao ${DEBUG_OUTPUT_PATH} (${shotInfo.count} ngay).`);
+      fs.writeFileSync(DEBUG_OUTPUT_PATH, combinedBuffer);
+      console.log(`[LOCAL_TEST] Da ghep thanh cong ${toProcess.length} ngay vao ${DEBUG_OUTPUT_PATH}.`);
       return;
     }
 
     try {
-      await sendDocumentToTelegram(buffer, filename, caption);
-      console.log(`Da gui anh ghep (${shotInfo.count} ngay) qua Telegram thanh cong.`);
-      saveSentLog([...sentSet, ...toProcess]);
+      await sendDocumentToTelegram(combinedBuffer, filename, caption);
+      console.log(`Da gui anh ghep (${toProcess.length} ngay) qua Telegram thanh cong.`);
+      saveSentLog([...sentSet, ...toProcess.map((b) => b.key)]);
     } catch (err) {
       console.error('Loi khi gui Telegram:', err);
       try {
